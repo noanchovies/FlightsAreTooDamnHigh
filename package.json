@@ -1,16 +1,7 @@
-{
-  "name": "flights-are-too-damn-high",
-  "version": "1.0.0",
-  "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start"
-  },
-  "dependencies": {
+"dependencies": {
+    "amadeus": "^9.2.0", // Or similar version
+    "axios": "^1.6.7",
     "next": "^14.1.0",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "axios": "^1.6.7"
+    "react-dom": "^18.2.0"
   }
-}
