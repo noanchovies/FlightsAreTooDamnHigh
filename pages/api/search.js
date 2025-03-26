@@ -1,19 +1,15 @@
-import axios from 'axios';
-import airportsData from '../../data/airports.json'; // Ensure path is correct
-import amadeus from '../../lib/amadeus'; // Ensure path is correct
+// FILE: pages/api/search.js
 
-// Helper function to get airport code from city name
-const getAirportCode = (cityName) => {
-  // Normalize city name for matching (lowercase, trim)
-  const normalizedCity = cityName.trim().toLowerCase();
-  // Find the city in the keys of airportsData
-  const cityKey = Object.keys(airportsData).find(key => key.toLowerCase() === normalizedCity);
-  // Return the IATA code if found, otherwise null or handle error
-  return cityKey ? airportsData[cityKey].iata : null;
+import airportsData from '../../data/airports.json'; // Ensure path is correct
+import amadeus from '../../lib/amadeus'; // Import the configured Amadeus client (using PRODUCTION hostname)
+
+// Helper function (same as before)
+const getAirportCodes = (cityName) => {
+  const foundKey = Object.keys(airportsData).find(key => key.toLowerCase() === cityName.toLowerCase());
+  return foundKey ? airportsData[foundKey] : null;
 };
 
 export default async function handler(req, res) {
-  // Basic validation for GET request
   if (req.method !== 'GET') {
     res.setHeader('Allow', ['GET']);
     return res.status(405).json({ message: `Method ${req.method} Not Allowed` });
@@ -21,104 +17,92 @@ export default async function handler(req, res) {
 
   const { fromCity, toCity, date } = req.query;
 
-  // Validate required query parameters
+  // --- Log received parameters ---
+  console.log(`API Route Received: fromCity=${fromCity}, toCity=${toCity}, date=${date}`);
+
   if (!fromCity || !toCity || !date) {
     return res.status(400).json({ message: 'Missing required query parameters: fromCity, toCity, date' });
   }
 
-  // --- Get Airport Codes ---
-  const originLocationCode = getAirportCode(fromCity);
-  const destinationLocationCode = getAirportCode(toCity);
+  // --- Airport Code Lookup ---
+  const originCodes = getAirportCodes(fromCity);
+  const destinationCodes = getAirportCodes(toCity);
 
-  if (!originLocationCode || !destinationLocationCode) {
-    const missingCodes = [];
-    if (!originLocationCode) missingCodes.push(fromCity);
-    if (!destinationLocationCode) missingCodes.push(toCity);
-    console.error(`Could not find airport codes for: ${missingCodes.join(', ')}`);
-    return res.status(400).json({
-      message: `Could not find airport codes for one or more cities: ${missingCodes.join(', ')}`,
-      details: `Failed cities: ${missingCodes.join(', ')}`
-    });
+  if (!originCodes) {
+    console.error(`Origin city lookup failed for: ${fromCity}`);
+    return res.status(400).json({ message: `Could not find airport codes for origin city: ${fromCity}` });
+  }
+  if (!destinationCodes) {
+    console.error(`Destination city lookup failed for: ${toCity}`);
+    return res.status(400).json({ message: `Could not find airport codes for destination city: ${toCity}` });
   }
 
-  // --- Call Amadeus API ---
+  const originLocationCode = originCodes.join(',');
+  const destinationLocationCode = destinationCodes.join(',');
+
+  // --- !! DEBUG LOGGING FOR ENVIRONMENT VARIABLES !! ---
+  // Check if the variables are loaded in the Vercel environment
+  const keyLoaded = process.env.AMADEUS_API_KEY ? 'Loaded (ends with ' + process.env.AMADEUS_API_KEY.slice(-4) + ')' : 'MISSING!';
+  const secretLoaded = process.env.AMADEUS_API_SECRET ? 'Loaded (ends with ' + process.env.AMADEUS_API_SECRET.slice(-4) + ')' : 'MISSING!';
+  console.log(`DEBUG: AMADEUS_API_KEY status = ${keyLoaded}`);
+  console.log(`DEBUG: AMADEUS_API_SECRET status = ${secretLoaded}`);
+  // --- End Debug Logging ---
+
+  // --- Call Amadeus API (Simplified) ---
   try {
-    console.log(`Searching flights: ${originLocationCode} -> ${destinationLocationCode} on ${date}`);
+    console.log(`Attempting Amadeus Search: ${originLocationCode} -> ${destinationLocationCode} on ${date}`);
 
-    // Amadeus API requires adults parameter, defaulting to 1
-    const adults = 1;
-    const maxResults = 20; // Limit results
-
-    // Use the Amadeus SDK client initialized in lib/amadeus.js
-    // The SDK handles token fetching/refreshing automatically if initialized correctly
     const response = await amadeus.shopping.flightOffersSearch.get({
       originLocationCode: originLocationCode,
       destinationLocationCode: destinationLocationCode,
       departureDate: date,
-      adults: adults,
-      max: maxResults,
-      currencyCode: 'EUR' // Example currency
+      adults: 1,
+      max: 5, // Fetch fewer results for now
+      currencyCode: 'EUR'
     });
 
-    // --- Process Response ---
-    if (response.data && response.data.length > 0) {
-      const flights = response.data.map((offer) => {
-        const itinerary = offer.itineraries[0]; // Assuming one itinerary per offer for simplicity
-        const segment = itinerary.segments[0]; // Assuming one segment for direct/simple flights
+    const offers = response.data || [];
+    console.log(`Amadeus returned ${offers.length} offers (raw).`);
 
-        // Basic check for hidden city (simplified)
-        const isHiddenCity = itinerary.segments.length > 1 && segment.arrival.iataCode !== destinationLocationCode;
+    // --- Basic Processing (No complex filtering yet) ---
+    // Just return the raw data structure for now, or a simplified version if preferred
+    const simplifiedFlights = offers.slice(0, 5).map(offer => ({
+        id: offer.id,
+        price: offer.price.total,
+        currency: offer.price.currency,
+        // Add other basic details if needed, directly from offer structure
+        // Example: Get first segment's details
+        firstSegment: offer.itineraries?.[0]?.segments?.[0]
+    }));
 
-        return {
-          id: offer.id,
-          airlineCode: segment.carrierCode,
-          airlineName: segment.carrierCode, // Placeholder - dictionary lookup needed for full name
-          departureTime: segment.departure.at,
-          arrivalTime: itinerary.segments[itinerary.segments.length - 1].arrival.at, // Arrival time of the last segment
-          origin: segment.departure.iataCode,
-          destination: itinerary.segments[itinerary.segments.length - 1].arrival.iataCode, // Final arrival airport
-          duration: itinerary.duration,
-          price: offer.price.total,
-          currency: offer.price.currency,
-          stops: itinerary.segments.length - 1,
-          isHiddenCity: isHiddenCity, // Mark if potentially a hidden city itinerary
-          bookingLink: `https://www.google.com/flights?q=Flights+from+${originLocationCode}+to+${destinationLocationCode}+on+${date}` // Example booking link
-        };
-      });
 
-      // Include Amadeus API usage from response headers if available
-      const usage = response.result?.meta?.count; // Example path, adjust based on actual response structure
-      console.log(`Amadeus API call successful. Usage count: ${usage || 'N/A'}`);
-
-      res.status(200).json({ flights: flights, usage: usage });
-
-    } else {
-      console.log('No flight offers found by Amadeus.');
-      res.status(200).json({ flights: [], message: 'No flight offers found matching your criteria.' });
-    }
+    res.status(200).json({
+         flights: simplifiedFlights, // Return simplified data
+         rawOfferCount: offers.length // Include count of raw offers received
+        });
 
   } catch (error) {
-    // Log the detailed error from Amadeus if available
-    const amadeusError = error.response ? error.response.data : error.message;
-    console.error('Amadeus API request failed:', JSON.stringify(amadeusError, null, 2));
+    // --- Log the Detailed Error ---
+    const amadeusError = error.response ? error.response.data : error.description || error.message;
+    const statusCode = error.response ? error.response.status : (error.code === 'AuthenticationError' ? 401 : 500);
 
-    // Determine the status code to send back
-    const statusCode = error.response ? error.response.status : 500;
+    console.error('--- AMADEUS API ERROR ---');
+    console.error('Status Code:', statusCode);
+    console.error('Error Details:', JSON.stringify(amadeusError, null, 2));
+    console.error('Attempted Search Params:', { originLocationCode, destinationLocationCode, date });
+    console.error('--- END AMADEUS API ERROR ---');
+
     let errorMessage = 'Failed to fetch flight offers.';
-
+    // Customize messages based on status code
     if (statusCode === 401) {
-      errorMessage = 'Amadeus API request failed with status 401 (Unauthorized). Check API Key/Secret and environment (Test vs Production).';
+      errorMessage = `Amadeus API request failed: 401 Unauthorized. Check API Key/Secret ENV VARS in Vercel (Key ends: ${process.env.AMADEUS_API_KEY?.slice(-4)}, Secret ends: ${process.env.AMADEUS_API_SECRET?.slice(-4)}) and ensure Production keys match Production URL.`;
     } else if (statusCode === 400) {
-      errorMessage = `Amadeus API request failed with status 400 (Bad Request). Check parameters: ${JSON.stringify(amadeusError?.errors || amadeusError)}`;
-    } else if (statusCode === 429) {
-      errorMessage = 'Amadeus API rate limit exceeded.';
-    } else if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
-       errorMessage = `Network error connecting to Amadeus API. Check hostname and connectivity.`;
-    }
+       errorMessage = `Amadeus API request failed: 400 Bad Request. Check parameters (codes: ${originLocationCode}, ${destinationLocationCode}, date: ${date}). Details: ${JSON.stringify(amadeusError?.errors || amadeusError)}`;
+    } // Add other status codes if needed
 
     res.status(statusCode).json({
       message: errorMessage,
-      details: amadeusError // Forward detailed error if available
+      details: amadeusError
     });
   }
 }
